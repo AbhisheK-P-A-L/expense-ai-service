@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from groq import Groq
 from dotenv import load_dotenv
+from app.database import fetch_user_expense_summary
 
 # Load environment variables from .env file
 load_dotenv()
@@ -33,6 +34,20 @@ class ParsedExpense(BaseModel):
     expenseDate: str                 # "YYYY-MM-DD"
 
 
+class ExpenseSummary(BaseModel):
+    """Summary data sent by Spring Boot for insight generation."""
+    totalSpent: float
+    categoryBreakdown: dict[str, float]   # e.g. {"FOOD": 3200, "TRAVEL": 1500}
+    topVendors: list[str] = []            # e.g. ["Swiggy", "Amazon"]
+    expenseCount: int
+    periodDays: int = 30                  # how many days this summary covers
+
+
+class UserInsightRequest(BaseModel):
+    userId: str
+    days: int = 30
+
+
 # ---------- Prompts ----------
 
 PARSE_EXPENSE_PROMPT = """You are an expense parser. Extract structured data from the user's text.
@@ -46,6 +61,17 @@ Schema:
   "vendor": "<merchant name or null>",
   "description": "<short description, max 10 words>",
   "expenseDate": "<YYYY-MM-DD, use today's date if not mentioned>"
+}"""
+
+GENERATE_INSIGHTS_PROMPT = """You are a personal finance advisor. Given the user's expense summary, generate 3-5 short, actionable spending insights.
+Return ONLY valid JSON, no explanation, no markdown backticks.
+
+Schema:
+{
+  "insights": [
+    "<insight string>",
+    ...
+  ]
 }"""
 
 
@@ -93,3 +119,47 @@ def parse_expense(req: ParseExpenseRequest):
         raise HTTPException(status_code=500, detail=f"LLM response missing required fields: {e}")
 
     return result
+
+
+@app.post("/generate-insights")
+def generate_insights(req: ExpenseSummary):
+    """Takes expense summary data and returns AI-generated spending insights."""
+
+    # Build a readable summary string for the LLM
+    summary_text = (
+        f"Total spent: ₹{req.totalSpent} over {req.periodDays} days across {req.expenseCount} expenses.\n"
+        f"Category breakdown: {json.dumps(req.categoryBreakdown)}\n"
+        f"Top vendors: {', '.join(req.topVendors) if req.topVendors else 'N/A'}"
+    )
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": GENERATE_INSIGHTS_PROMPT},
+            {"role": "user", "content": summary_text}
+        ],
+        temperature=0.3,  # Slightly creative for useful advice
+        response_format={"type": "json_object"}
+    )
+
+    raw = response.choices[0].message.content.strip()
+
+    try:
+        parsed = json.loads(raw)
+        insights = parsed.get("insights", [])
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="LLM returned invalid JSON")
+
+    return {"insights": insights}
+
+
+@app.post("/user-insights")
+def get_user_insights_from_db(req: UserInsightRequest):
+    """Fetches user expenses directly from PostgreSQL and generates AI spending insights."""
+    try:
+        summary_data = fetch_user_expense_summary(user_id=req.userId, days=req.days)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+    summary = ExpenseSummary(**summary_data)
+    return generate_insights(summary)
