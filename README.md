@@ -157,8 +157,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## 🐳 Docker & AWS Deployment
 
-### Run with Docker locally or on AWS EC2 (Student Tier / Free Tier):
-
 ```bash
 # Build Docker image
 docker build -t expense-ai-service .
