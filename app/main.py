@@ -6,6 +6,9 @@ from pydantic import BaseModel
 from groq import Groq
 from dotenv import load_dotenv
 from app.database import fetch_user_expense_summary
+from app.validator import validate_nl_query
+from app.planner import generate_query_plan
+from app.executor import execute_query_plan
 
 # Load environment variables from .env file
 load_dotenv()
@@ -46,6 +49,11 @@ class ExpenseSummary(BaseModel):
 class UserInsightRequest(BaseModel):
     userId: str
     days: int = 30
+
+
+class NLQueryRequest(BaseModel):
+    userId: str
+    query: str
 
 
 # ---------- Prompts ----------
@@ -163,3 +171,29 @@ def get_user_insights_from_db(req: UserInsightRequest):
 
     summary = ExpenseSummary(**summary_data)
     return generate_insights(summary)
+
+
+@app.post("/nl-query")
+def process_natural_language_query(req: NLQueryRequest):
+    """
+    3-Stage Natural Language to SQL Pipeline:
+    1. Validator: AST security & injection prevention
+    2. Planner: Deterministic LLM query planning with temporal anchoring
+    3. Executor: Parameterized tenant-isolated SQL query execution
+    """
+    # Stage 1: Validation
+    validate_nl_query(req.query)
+
+    # Stage 2: Planning
+    try:
+        plan = generate_query_plan(req.query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query planning failed: {e}")
+
+    # Stage 3: Execution
+    try:
+        result = execute_query_plan(user_id=req.userId, original_query=req.query, plan=plan)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query execution failed: {e}")
+
+    return result
